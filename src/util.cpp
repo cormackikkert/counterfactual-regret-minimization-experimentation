@@ -1,8 +1,6 @@
 #include <bits/stdc++.h>
 using namespace std;
 
-static const int FACE = 6;
-
 class Claim {
     public:
 
@@ -14,12 +12,12 @@ class Claim {
         num = n;
         rank = r;
         if (r!=1) {
-            strength = (FACE-1)*n + (n/2) + r - (FACE+1);
+            strength = 5*n + (n/2) + r - 7;
         } else {
             if (r <= dice/2) {
-                strength = (2*FACE-1)*n - FACE;
+                strength = 11*n - 6;
             } else {
-                strength = (FACE-1)*dice + n - 1;
+                strength = 5*dice + n - 1;
             }
         }
     }
