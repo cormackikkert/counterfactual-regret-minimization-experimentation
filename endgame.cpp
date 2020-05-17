@@ -201,7 +201,7 @@ double cfr(EndgameGame game_state, double p0, double p1) {
 }
 int main() {
     ios::sync_with_stdio(0), cin.tie(0), cout.tie(0);
-	
+	srand (time(NULL));
 	
 	/*
 	cout << g.getNumLegalMoves() << endl;
@@ -215,11 +215,12 @@ int main() {
 	*/
 
 	double res = 0;
-	for (int i = 0; i < 1000; ++i) {
+	for (int i = 0; i < 10000; ++i) {
 		EndgameGame g;
-		double c = cfr(g, 1.0, 1.0);
-		res += c;
-		// cout << c << endl;
+		res += cfr(g, 1.0, 1.0);
+		if ((i + 1) % 1000 == 0) {
+			cout << res / (double) i << endl;
+		}
 	}
 	EndgameGame g;
 	EndgameNode n = informationStates[g.getInfoSet()];
@@ -227,5 +228,5 @@ int main() {
 		cout << x << " ";
 	}
 	cout << endl;
-	cout << (res / 1000.0) << endl;
+	cout << (res / 10000.0) << endl;
 }
