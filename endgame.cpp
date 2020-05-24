@@ -1,5 +1,10 @@
+#pragma GCC target ("avx2")
+#pragma GCC optimization ("O3")
+#pragma GCC optimization ("unroll-loops")
+
 #include <bits/stdc++.h>
 using namespace std;
+using namespace std::chrono; 
 
 class EndgameGame {
 	public:
@@ -127,7 +132,7 @@ class EndgameNode {
 
 	vector<double> getAverageStrategy() {
 		vector<double> posRegrets (num_actions);
-		for (int i = 0; i < num_actions; ++i) if (regretSum[i] > 0.01) posRegrets[i] = regretSum[i];
+		for (int i = 0; i < num_actions; ++i) if (strategySum[i] > 0.01) posRegrets[i] = strategySum[i];
 
 		double normalizing_sum = 0;
 		for (int i = 0; i < num_actions; ++i) normalizing_sum += posRegrets[i];
@@ -152,81 +157,496 @@ class EndgameNode {
 		}
 		return res;
 	}
+
+	pair<int, int> sampleActionCurrent() {
+		vector<pair<int, double>> actions = getMoveProb(getStrategy(0.0));
+		double r = static_cast <double> (rand()) / static_cast <double> (RAND_MAX);
+		double cur = 0.0;
+		for (int i = 0; i < actions.size(); ++i) {
+			if (cur + actions[i].second >= r) return {i, actions[i].first};
+			cur += actions[i].second;
+		}
+		cout << "FAILED: " << r << " " << cur << endl;
+		for (pair<int, double> t : actions) {
+			cout << t.first << " " << t.second << endl;
+		}
+		cout << infoSet << endl;
+		return {0, actions[0].first};
+	}
+
+	int sampleAction() {
+		vector<pair<int, double>> actions = getMoveProb(getAverageStrategy());
+		double r = static_cast <double> (rand()) / static_cast <double> (RAND_MAX);
+		double cur = 0.0;
+		for (int i = 0; i < actions.size(); ++i) {
+			if (cur + actions[i].second >= r) return actions[i].first;
+			cur += actions[i].second;
+		}
+		cout << "FAILED: " << r << " " << cur << endl;
+		for (pair<int, double> t : actions) {
+			cout << t.first << " " << t.second << endl;
+		}
+		cout << infoSet << endl;
+		return actions[0].first;
+	}
 };
 
-map<int, EndgameNode> informationStates;
+/*
+	Variants
+		- Normal
+		- Weighted strategy sampling
+		- Positive regret matching
+		- Alternating updates
+*/
+class DefaultCFRTrainer {
+	public:
+	map<int, EndgameNode> informationStates;
+	DefaultCFRTrainer () {}
 
-double cfr(EndgameGame game_state, double p0, double p1) {
-	if (game_state.isTerminal()) return game_state.getUtility();
+	double cfr(EndgameGame game_state, double p0, double p1) {
+		if (game_state.isTerminal()) return game_state.getUtility();
 
-	// get information node (or create it if it does not exist)
-	int info_set = game_state.getInfoSet();
+		// get information node (or create it if it does not exist)
+		int info_set = game_state.getInfoSet();
 
-	EndgameNode node;
-	if (informationStates.find(info_set) == informationStates.end()) {
-		node = EndgameNode(game_state);
-	} else {
-		node = informationStates[info_set];
-	}
-	
-	int num_moves = game_state.getNumLegalMoves();
-
-	
-	double node_util = 0;
-	vector<double> util (num_moves);
-	vector<double> strategy = node.getStrategy(game_state.player ? p1 : p0);
-
-	vector<pair<int, double>> moveProbs = node.getMoveProb(strategy);
-	for (int i = 0; i < num_moves; ++i) {
-		int action = moveProbs[i].first;
-		double prob = moveProbs[i].second;
-		if (game_state.player) {
-			util[i] = -cfr(game_state.makeMove(action), p0, p1 * prob);  
+		EndgameNode node;
+		if (informationStates.find(info_set) == informationStates.end()) {
+			node = EndgameNode(game_state);
 		} else {
-			util[i] = -cfr(game_state.makeMove(action), p0 * prob, p1);
+			node = informationStates[info_set];
 		}
-		node_util += prob * util[i];
+		
+		int num_moves = game_state.getNumLegalMoves();
+
+		
+		double node_util = 0;
+		vector<double> util (num_moves);
+		vector<double> strategy = node.getStrategy(game_state.player ? p1 : p0);
+
+		vector<pair<int, double>> moveProbs = node.getMoveProb(strategy);
+		for (int i = 0; i < num_moves; ++i) {
+			int action = moveProbs[i].first;
+			double prob = moveProbs[i].second;
+			if (game_state.player) {
+				util[i] = -cfr(game_state.makeMove(action), p0, p1 * prob);  
+			} else {
+				util[i] = -cfr(game_state.makeMove(action), p0 * prob, p1);
+			}
+			node_util += prob * util[i];
+		}
+
+		// compute and accumulate counterfactual regret
+		for (int i = 0; i < num_moves; ++i) {
+			int action = moveProbs[i].first;
+			double prob = moveProbs[i].second;
+			double regret = util[i] - node_util;
+			node.regretSum[i] += (game_state.player ? p0 : p1) * regret;
+		}
+
+		informationStates[info_set] = node;
+		return node_util;
 	}
 
-	// compute and accumulate counterfactual regret
-	for (int i = 0; i < num_moves; ++i) {
-		int action = moveProbs[i].first;
-		double prob = moveProbs[i].second;
-		double regret = util[i] - node_util;
-		node.regretSum[i] += (game_state.player ? p0 : p1) * regret;
+	inline double train(int iterations) {
+		double res;
+		for (int i = 0; i < iterations; ++i) {
+			for (int r1 = 1; r1 <= 6; ++r1) {
+				for (int r2 = 1; r2 <= 6; ++r2) {
+					EndgameGame g;
+					g.p1Roll = r1;
+					g.p2Roll = r2;
+					res += cfr(g, 1.0, 1.0);
+				}
+			}
+			
+		}
+		return res / (36.0 * (double) iterations);
 	}
 
-	informationStates[info_set] = node;
-	return node_util;
+	void train_time(int time) {
+		auto s1 = high_resolution_clock::now(); 
+		while (true) {
+			train(1);
+			auto e1 = high_resolution_clock::now(); 
+			auto d1 = duration_cast<microseconds>(e1 - s1); 
+			if (d1.count() > time) break;
+		}
+	}
+};
+
+class DefaultCFRWeightedTrainer {
+	public:
+	map<int, EndgameNode> informationStates;
+	DefaultCFRWeightedTrainer () {}
+	double global_its = 1.0;
+
+	double cfr(EndgameGame game_state, double p0, double p1) {
+		if (game_state.isTerminal()) return game_state.getUtility();
+
+		// get information node (or create it if it does not exist)
+		int info_set = game_state.getInfoSet();
+
+		EndgameNode node;
+		if (informationStates.find(info_set) == informationStates.end()) {
+			node = EndgameNode(game_state);
+		} else {
+			node = informationStates[info_set];
+		}
+		
+		int num_moves = game_state.getNumLegalMoves();
+
+		
+		double node_util = 0;
+		vector<double> util (num_moves);
+		vector<double> strategy = node.getStrategy(global_its * (game_state.player ? p1 : p0));
+
+		vector<pair<int, double>> moveProbs = node.getMoveProb(strategy);
+		for (int i = 0; i < num_moves; ++i) {
+			int action = moveProbs[i].first;
+			double prob = moveProbs[i].second;
+			if (game_state.player) {
+				util[i] = -cfr(game_state.makeMove(action), p0, p1 * prob);  
+			} else {
+				util[i] = -cfr(game_state.makeMove(action), p0 * prob, p1);
+			}
+			node_util += prob * util[i];
+		}
+
+		// compute and accumulate counterfactual regret
+		for (int i = 0; i < num_moves; ++i) {
+			int action = moveProbs[i].first;
+			double prob = moveProbs[i].second;
+			double regret = util[i] - node_util;
+			node.regretSum[i] += (game_state.player ? p0 : p1) * regret;
+		}
+
+		informationStates[info_set] = node;
+		return node_util;
+	}
+
+	inline double train(int iterations) {
+		double res;
+		for (int i = 0; i < iterations; ++i) {
+			global_its += 1.0;
+			for (int r1 = 1; r1 <= 6; ++r1) {
+				for (int r2 = 1; r2 <= 6; ++r2) {
+					EndgameGame g;
+					g.p1Roll = r1;
+					g.p2Roll = r2;
+					res += cfr(g, 1.0, 1.0);
+				}
+			}
+			
+		}
+		return res / (36.0 * (double) iterations);
+	}
+
+	void train_time(int time) {
+		auto s1 = high_resolution_clock::now(); 
+		while (true) {
+			train(1);
+			auto e1 = high_resolution_clock::now(); 
+			auto d1 = duration_cast<microseconds>(e1 - s1); 
+			if (d1.count() > time) break;
+		}
+	}
+};
+
+class DefaultCFRPosRegretTrainer {
+	public:
+	map<int, EndgameNode> informationStates;
+	DefaultCFRPosRegretTrainer () {}
+
+	double cfr(EndgameGame game_state, double p0, double p1) {
+		if (game_state.isTerminal()) return game_state.getUtility();
+
+		// get information node (or create it if it does not exist)
+		int info_set = game_state.getInfoSet();
+
+		EndgameNode node;
+		if (informationStates.find(info_set) == informationStates.end()) {
+			node = EndgameNode(game_state);
+		} else {
+			node = informationStates[info_set];
+		}
+		
+		int num_moves = game_state.getNumLegalMoves();
+
+		
+		double node_util = 0;
+		vector<double> util (num_moves);
+		vector<double> strategy = node.getStrategy(game_state.player ? p1 : p0);
+
+		vector<pair<int, double>> moveProbs = node.getMoveProb(strategy);
+		for (int i = 0; i < num_moves; ++i) {
+			int action = moveProbs[i].first;
+			double prob = moveProbs[i].second;
+			if (game_state.player) {
+				util[i] = -cfr(game_state.makeMove(action), p0, p1 * prob);  
+			} else {
+				util[i] = -cfr(game_state.makeMove(action), p0 * prob, p1);
+			}
+			node_util += prob * util[i];
+		}
+
+		// compute and accumulate counterfactual regret
+		for (int i = 0; i < num_moves; ++i) {
+			int action = moveProbs[i].first;
+			double prob = moveProbs[i].second;
+			double regret = util[i] - node_util;
+			node.regretSum[i] += (game_state.player ? p0 : p1) * regret;
+			node.regretSum[i] = max(0.0, node.regretSum[i]);
+		}
+
+		informationStates[info_set] = node;
+		return node_util;
+	}
+
+	inline double train(int iterations) {
+		double res;
+		for (int i = 0; i < iterations; ++i) {
+			for (int r1 = 1; r1 <= 6; ++r1) {
+				for (int r2 = 1; r2 <= 6; ++r2) {
+					EndgameGame g;
+					g.p1Roll = r1;
+					g.p2Roll = r2;
+					res += cfr(g, 1.0, 1.0);
+				}
+			}
+			
+		}
+		return res / (36.0 * (double) iterations);
+	}
+
+	void train_time(int time) {
+		auto s1 = high_resolution_clock::now(); 
+		while (true) {
+			train(1);
+			auto e1 = high_resolution_clock::now(); 
+			auto d1 = duration_cast<microseconds>(e1 - s1); 
+			if (d1.count() > time) break;
+		}
+	}
+};
+
+class DefaultESCFRTrainer {
+	public:
+	map<int, EndgameNode> informationStates;
+	DefaultESCFRTrainer () {}
+
+	double cfr(EndgameGame game_state, bool currentPlayer) {
+		if (game_state.isTerminal()) {
+			double u = game_state.getUtility();
+			return (game_state.player == currentPlayer) ? u : -u;
+		}
+
+		// get information node (or create it if it does not exist)
+		int info_set = game_state.getInfoSet();
+
+		EndgameNode node;
+		if (informationStates.find(info_set) == informationStates.end()) {
+			node = EndgameNode(game_state);
+		} else {
+			node = informationStates[info_set];
+		}
+		
+		int num_moves = game_state.getNumLegalMoves();
+
+		if (game_state.player == currentPlayer) {
+			double node_util = 0;
+			vector<double> util (num_moves);
+			vector<double> strategy = node.getStrategy(0.0); // hacky
+
+			vector<pair<int, double>> moveProbs = node.getMoveProb(strategy);
+			for (int i = 0; i < num_moves; ++i) {
+				int action = moveProbs[i].first;
+				double prob = moveProbs[i].second;
+				util[i] = cfr(game_state.makeMove(action), currentPlayer);  
+				node_util += prob * util[i];
+			}
+
+			// compute and accumulate counterfactual regret
+			for (int i = 0; i < num_moves; ++i) {
+				int action = moveProbs[i].first;
+				double prob = moveProbs[i].second;
+				double regret = util[i] - node_util;
+				node.regretSum[i] += regret;
+			}
+
+			informationStates[info_set] = node;
+			return node_util;
+		} else {
+			pair<int, int> move = node.sampleActionCurrent();
+			node.strategySum[move.first]+=1.0; // hacky 
+			informationStates[info_set] = node;
+			return cfr(game_state.makeMove(move.second), currentPlayer);
+		}
+	}
+
+	inline double train(int iterations) {
+		double res;
+		for (int i = 0; i < iterations; ++i) {
+			for (int r1 = 1; r1 <= 6; ++r1) {
+				for (int r2 = 1; r2 <= 6; ++r2) {
+					EndgameGame g;
+					g.p1Roll = r1;
+					g.p1Roll = r2;
+					res += cfr(g, false);
+					g = EndgameGame();
+					g.p1Roll = r1;
+					g.p1Roll = r2;
+					res -= cfr(g, true);
+				}
+			}
+			
+		}
+		return res / (2.0 * 36.0 * (double) iterations);
+	}
+
+	void train_time(int time) {
+		auto s1 = high_resolution_clock::now(); 
+		while (true) {
+			train(1);
+			auto e1 = high_resolution_clock::now(); 
+			auto d1 = duration_cast<microseconds>(e1 - s1); 
+			if (d1.count() > time) break;
+		}
+	}
+};
+
+double compareOnce(map<int, EndgameNode> & bot1, map<int, EndgameNode> & bot2, int r1, int r2) {
+	EndgameGame g;
+	g.p1Roll = r1;
+	g.p2Roll = r2;
+	while (!g.isTerminal()) {
+
+		int infoSet = g.getInfoSet();
+
+		EndgameNode node;
+		if (g.player) {
+			if (bot2.find(infoSet) == bot2.end()) bot2[infoSet] = EndgameNode(g);
+			node = bot2[g.getInfoSet()];
+		} else {
+			if (bot1.find(infoSet) == bot1.end()) bot1[infoSet] = EndgameNode(g);
+			node = bot1[g.getInfoSet()];
+		}
+
+		int action = node.sampleAction();
+		g = g.makeMove(action);
+	}
+	// return score for player 1
+	return (g.player) ? -g.getUtility() : g.getUtility();
 }
+
+double compare(map<int, EndgameNode> & bot1, map<int, EndgameNode> & bot2) {
+	// play 50 games, swapping players each one
+	double bot1util = 0.0;
+	double bot2util = 0.0;
+	for (int i = 0; i < 1000; ++i) {
+		for (int r1 = 1; r1 <= 6; ++r1) {
+			for (int r2 = 1; r2 <= 6; ++r2) {
+				bot1util += compareOnce(bot1, bot2, r1, r2);
+				bot1util -= compareOnce(bot2, bot1, r1, r2);
+			}
+		}
+	}
+	return bot1util / 36.0 / 2000.0;
+}
+
+void printStates(map<int, EndgameNode> & bot1) {
+	cout << bot1.size() << endl;
+	for (pair<int, EndgameNode> data : bot1) {
+		int infoSet = data.first;
+		EndgameNode node = data.second;
+		cout << infoSet << endl;
+		cout << node.num_actions << endl;
+		for (double x : node.strategySum) cout << x << " ";
+		cout << endl;
+	}
+}
+
+map<int, EndgameNode> readStates() {
+	map<int, EndgameNode> data;
+	int N; cin >> N;
+	for (int i = 0; i < N; ++i) {		
+		EndgameNode node;
+		cin >> node.infoSet;
+		cin >> node.num_actions;
+		node.strategySum.resize(node.num_actions);
+		for (int j = 0; j < node.num_actions; ++j) {
+			cin >> node.strategySum[j];
+		}
+		data[node.infoSet] = node;
+	}
+	return data;
+}
+
 int main() {
-    ios::sync_with_stdio(0), cin.tie(0), cout.tie(0);
+    // ios::sync_with_stdio(0), cin.tie(0), cout.tie(0);
 	srand (time(NULL));
+	map<int, EndgameNode> standard = readStates();
+	// cout << "READ" << endl;
+
+	/* 
+		- Training code
+
+	DefaultCFRTrainer trainer1;
+	for (int i = 0; true; ++i) {
+		trainer1.train(1000);
+		ofstream file;
+		file.open("saved" + to_string(i) + ".txt");
+		
+		map<int, EndgameNode> & bot1 = trainer1.informationStates;
+
+		file << bot1.size() << endl;
+		for (pair<int, EndgameNode> data : bot1) {
+			int infoSet = data.first;
+			EndgameNode node = data.second;
+			file << infoSet << endl;
+			file << node.num_actions << endl;
+			for (double x : node.strategySum) file << x << " ";
+			file << endl;
+		}
+
+		file.close();
+		// trainer2.train(50);
+		// cout << compare(trainer1.informationStates, standard) << endl;
+	}
+	*/
+	DefaultCFRTrainer t1 = DefaultCFRTrainer();
+	DefaultCFRWeightedTrainer t2 = DefaultCFRWeightedTrainer();
+	DefaultCFRPosRegretTrainer t3 = DefaultCFRPosRegretTrainer();
+	DefaultESCFRTrainer t4 = DefaultESCFRTrainer ();
+
+	cout << "---" << endl;
+	cout << compare(t1.informationStates, standard) << endl;
+	cout << compare(t2.informationStates, standard) << endl;
+	cout << compare(t3.informationStates, standard) << endl;
+	cout << compare(t4.informationStates, standard) << endl;
+
+	for (int i = 0; ; ++i) {
+		t1.train_time(10000000);
+		t2.train_time(10000000);
+		t3.train_time(10000000);
+		t4.train_time(10000000);
+		cout << "---" << endl;
+		cout << compare(t1.informationStates, standard) << endl;
+		cout << compare(t2.informationStates, standard) << endl;
+		cout << compare(t3.informationStates, standard) << endl;
+		cout << compare(t4.informationStates, standard) << endl;
+	}
 	
 	/*
-	cout << g.getNumLegalMoves() << endl;
-	g = g.makeMove(0);
-	cout << g.getNumLegalMoves() << endl;
-	g = g.makeMove(2);
-	cout << g.getNumLegalMoves() << endl;
-	g = g.makeMove(11);
-	cout << g << endl;
-	cout << g.getNumLegalMoves() << endl;
-	*/
+	auto s2 = high_resolution_clock::now(); 
+	while (true) {
+		t1.train(1);
+		auto e2 = high_resolution_clock::now(); 
+		auto d2 = duration_cast<microseconds>(e2 - s2); 
+		if (d2.count() > 10000000) break;
+	}
 
-	double res = 0;
-	for (int i = 0; i < 10000; ++i) {
-		EndgameGame g;
-		res += cfr(g, 1.0, 1.0);
-		if ((i + 1) % 1000 == 0) {
-			cout << res / (double) i << endl;
-		}
-	}
-	EndgameGame g;
-	EndgameNode n = informationStates[g.getInfoSet()];
-	for (double x : n.getAverageStrategy()) {
-		cout << x << " ";
-	}
-	cout << endl;
-	cout << (res / 10000.0) << endl;
+	cout << compare(t1.informationStates, t2.informationStates) << endl;
+
+	// -0.78
+	*/
 }
